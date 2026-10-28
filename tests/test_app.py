@@ -21,13 +21,25 @@ class LeadProcessorTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmp.name) / "leads.sqlite3")
 
-    def tearDown(self):
-        self.tmp.cleanup()
-
     def count(self, table):
-        with sqlite3.connect(self.db_path) as conn:
-            exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
-            return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] if exists else 0
+        conn = sqlite3.connect(self.db_path)
+        try:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            if exists:
+                return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            return 0
+        finally:
+            conn.close()
+
+    def tearDown(self):
+        import gc
+        gc.collect()
+        try:
+            self.tmp.cleanup()
+        except PermissionError:
+            pass
 
     def test_new_lead_creates_one_notification(self):
         response = process_event(dict(GOOD), self.db_path)
@@ -84,6 +96,19 @@ class LeadProcessorTests(unittest.TestCase):
         response = process_event({**GOOD, "external_id": 100}, self.db_path)
         self.assertEqual(response["status"], "invalid")
         self.assertEqual(self.count("leads"), 0)
+
+    def test_empty_source_is_invalid(self):
+        result = process_event({**GOOD, "source": "   "}, self.db_path)
+        self.assertEqual(result["status"], "invalid")
+        self.assertTrue(result.get("reason"))
+        self.assertEqual(self.count("leads"), 0)
+
+    def test_case_sensitive_source(self):
+        first = process_event({**GOOD, "source": "Telegram"}, self.db_path)
+        second = process_event({**GOOD, "source": "telegram"}, self.db_path)
+        self.assertEqual(first["status"], "created")
+        self.assertEqual(second["status"], "created")
+        self.assertNotEqual(first["id"], second["id"])
 
 
 if __name__ == "__main__":
